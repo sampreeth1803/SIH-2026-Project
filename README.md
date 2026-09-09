@@ -2,13 +2,13 @@
 
 ## Problem Statement
 
-> Paste the official SIH problem statement here.
+> City-Wide AI Engine for Multi-Camera ANPR Trajectory Tracking and Urban Traffic Analytics
 
 ## 💡 Our Solution
 
 Our proposed solution:
 
-> Briefly describe the idea here.
+> CityPulse AI is a centralized AI-powered platform that transforms existing CCTV networks into a unified urban traffic intelligence system. It uses computer vision and ANPR to detect and identify vehicles across multiple cameras, reconstruct their trajectories, and analyze traffic flow. The platform provides real-time congestion monitoring, vehicle journey tracking, traffic anomaly detection, and short-term congestion prediction through an interactive city dashboard. By combining detection, identification, tracking, analytics, and prediction, CityPulse AI enables authorities to make faster, data-driven traffic management decisions.
 
 ## 🎯 Objective
 
