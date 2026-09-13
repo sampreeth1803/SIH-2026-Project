@@ -4,6 +4,8 @@ from typing import Optional
 
 from detection import VEHICLE_CLASSES
 
+MODEL_PATH = Path(__file__).resolve().parent / "yolo11n.pt"
+
 CLASS_NAMES = {
     2: "car",
     3: "motorcycle",
@@ -20,7 +22,7 @@ def track_vehicles(
 ):
     from ultralytics import YOLO
 
-    model = YOLO("yolo11n.pt")
+    model = YOLO(str(MODEL_PATH))
     results = model.track(
         source=str(video_path),
         tracker="bytetrack.yaml",
@@ -70,11 +72,13 @@ def track_vehicles(
 
         occupancy_ratios.append(min(vehicle_area / road_area, 1.0))
 
-    vehicle_counts = {name: len(ids) for name, ids in unique_vehicles.items()}
+    vehicle_counts = {name: int(len(ids)) for name, ids in unique_vehicles.items()}
     return {
         "vehicle_counts": vehicle_counts,
-        "average_occupancy": sum(occupancy_ratios) / len(occupancy_ratios)
-        if occupancy_ratios
-        else 0.0,
-        "peak_occupancy": max(occupancy_ratios, default=0.0),
+        "average_occupancy": float(
+            sum(occupancy_ratios) / len(occupancy_ratios)
+            if occupancy_ratios
+            else 0.0
+        ),
+        "peak_occupancy": float(max(occupancy_ratios, default=0.0)),
     }

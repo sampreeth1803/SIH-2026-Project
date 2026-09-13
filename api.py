@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-import subprocess
 from threading import Lock, Thread
 from uuid import uuid4
 
@@ -11,40 +11,51 @@ from fastapi.responses import FileResponse
 
 from detection import detect_vehicles
 from tracking import track_vehicles
+from video_processing import convert_to_mp4, find_tracking_video
 
 BASE_DIR = Path(__file__).resolve().parent
+VIDEO_DIR = BASE_DIR / "videos"
 OUTPUT_DIR = BASE_DIR / "output"
-VIDEO_PATH = BASE_DIR / "traffic_video.mp4"
 
 CAMERAS = [
     {
         "id": "CAM-BLR-01",
-        "name": "Outer Ring Road",
-        "location": "Marathahalli Junction",
-        "latitude": 12.9592,
-        "longitude": 77.6974,
-        "video_path": VIDEO_PATH,
-        "metadata": "Simulated prerecorded feed",
+        "name": "Bangalore University Road",
+        "location": "Jnanabharathi",
+        "latitude": 12.935609,
+        "longitude": 77.512984,
+        "video_path": VIDEO_DIR / "cam_blr_01.mp4",
+        "metadata": "Camera 01 feed",
         "road_roi": [0, 180, 1280, 720],
     },
     {
         "id": "CAM-BLR-02",
-        "name": "Central Bengaluru",
-        "location": "Majestic",
-        "latitude": 12.9762,
-        "longitude": 77.5713,
-        "video_path": VIDEO_PATH,
-        "metadata": "Simulated prerecorded feed",
+        "name": "Rajarajeshwarinagara Gate",
+        "location": "Mysore Road",
+        "latitude": 12.936354,
+        "longitude": 77.518235,
+        "video_path": VIDEO_DIR / "cam_blr_02.mp4",
+        "metadata": "Camera 02 feed",
         "road_roi": [0, 180, 1280, 720],
     },
     {
         "id": "CAM-BLR-03",
-        "name": "Tech Corridor",
-        "location": "Electronic City",
-        "latitude": 12.8458,
-        "longitude": 77.6603,
-        "video_path": VIDEO_PATH,
-        "metadata": "Simulated prerecorded feed",
+        "name": "Bank of Baroda Junction",
+        "location": "Adjacent to RR Nagar Petrol Bunk",
+        "latitude": 12.932737,
+        "longitude": 77.516147,
+        "video_path": VIDEO_DIR / "cam_blr_03.mp4",
+        "metadata": "Camera 03 feed",
+        "road_roi": [0, 180, 1280, 720],
+    },
+    {
+        "id": "CAM-BLR-04",
+        "name": "Magadi Road Junction",
+        "location": "Under the bridge near Magadi Road",
+        "latitude": 12.945277,
+        "longitude": 77.527680,
+        "video_path": VIDEO_DIR / "cam_blr_04.mp4",
+        "metadata": "Camera 04 feed",
         "road_roi": [0, 180, 1280, 720],
     },
 ]
@@ -62,6 +73,7 @@ app.add_middleware(
 
 
 def public_camera(camera: dict) -> dict:
+    manifest = camera_manifest(camera["id"])
     return {
         key: value
         for key, value in camera.items()
@@ -69,49 +81,47 @@ def public_camera(camera: dict) -> dict:
     } | {
         "video_url": f"/api/cameras/{camera['id']}/video",
         "tracked_video_url": f"/api/cameras/{camera['id']}/tracked-video",
+        "tracking_ready": manifest is not None,
+        "analytics": manifest.get("analytics") if manifest else None,
     }
 
 
-def tracked_video_path() -> Path | None:
-    tracking_dir = OUTPUT_DIR / "track" / "vehicle_tracking"
-    candidates = sorted(
-        [*tracking_dir.glob("*.mp4"), *tracking_dir.glob("*.avi")],
-        key=lambda path: path.stat().st_mtime,
+def camera_manifest(camera_id: str) -> dict | None:
+    manifest_path = OUTPUT_DIR / "cameras" / camera_id / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    tracked_path = OUTPUT_DIR / "cameras" / camera_id / manifest.get("tracked_video", "")
+    return manifest if tracked_path.is_file() else None
+
+
+def tracked_video_path(camera_id: str) -> Path | None:
+    manifest = camera_manifest(camera_id)
+    if manifest:
+        return OUTPUT_DIR / "cameras" / camera_id / manifest["tracked_video"]
+    return find_tracking_video(
+        OUTPUT_DIR / "cameras" / camera_id / "track" / "vehicle_tracking"
     )
-    return candidates[-1] if candidates else None
 
 
 def run_tracking(job_id: str, camera: dict, confidence: float, road_roi: tuple[int, int, int, int] | None):
     try:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        detect_vehicles(camera["video_path"], OUTPUT_DIR, confidence)
+        camera_output_dir = OUTPUT_DIR / "cameras" / camera["id"]
+        camera_output_dir.mkdir(parents=True, exist_ok=True)
+        detect_vehicles(camera["video_path"], camera_output_dir, confidence)
         traffic_data = track_vehicles(
-            camera["video_path"], OUTPUT_DIR, confidence, road_roi
+            camera["video_path"], camera_output_dir, confidence, road_roi
         )
-        output_files = sorted(
-            (OUTPUT_DIR / "track" / "vehicle_tracking").glob("*.avi"),
-            key=lambda path: path.stat().st_mtime,
+        output_path = find_tracking_video(
+            camera_output_dir / "track" / "vehicle_tracking"
         )
-        output_path = output_files[-1] if output_files else None
         if output_path:
-            mp4_path = output_path.with_suffix(".mp4")
-            conversion = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(output_path),
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    str(mp4_path),
-                ],
-                capture_output=True,
-                check=False,
+            output_path = convert_to_mp4(
+                output_path, camera_output_dir / "tracked.mp4"
             )
-            if conversion.returncode == 0 and mp4_path.is_file():
-                output_path = mp4_path
         with jobs_lock:
             jobs[job_id].update(
                 status="completed",
@@ -152,7 +162,7 @@ def tracked_camera_video(camera_id: str):
     camera = next((item for item in CAMERAS if item["id"] == camera_id), None)
     if camera is None:
         raise HTTPException(status_code=404, detail="Camera not found")
-    output_path = tracked_video_path()
+    output_path = tracked_video_path(camera_id)
     if output_path is None:
         raise HTTPException(
             status_code=404,

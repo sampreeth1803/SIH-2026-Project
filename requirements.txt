@@ -1,5 +1,6 @@
 ultralytics
 easyocr
 opencv-python
+imageio-ffmpeg
 fastapi
 uvicorn[standard]

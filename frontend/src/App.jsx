@@ -52,8 +52,9 @@ function App() {
     setError("");
   };
 
-  const analytics = null;
-  const trafficStatus = "Preprocessed";
+  const analytics = selectedCamera?.analytics;
+  const trackingReady = selectedCamera?.tracking_ready;
+  const trafficStatus = statusFromAnalytics(analytics);
 
   return (
     <main className="shell">
@@ -112,11 +113,11 @@ function App() {
             <div className="camera-meta"><span>{selectedCamera.location}</span><span>{selectedCamera.metadata}</span></div>
             <div className="video-stack">
               <div className="video-frame">
-                <video key={selectedCamera.tracked_video_url} src={`${API_URL}${selectedCamera.tracked_video_url}`} controls muted loop playsInline />
+                {trackingReady ? <video key={selectedCamera.tracked_video_url} src={`${API_URL}${selectedCamera.tracked_video_url}`} controls autoPlay muted loop playsInline /> : <div className="video-state">Run precompute.py before opening this feed.</div>}
                 <span className="feed-tag">TRACKED VIDEO</span>
               </div>
               <div className="video-frame source-video">
-                <video key={selectedCamera.video_url} src={`${API_URL}${selectedCamera.video_url}`} controls muted loop playsInline />
+                <video key={selectedCamera.video_url} src={`${API_URL}${selectedCamera.video_url}`} controls autoPlay muted loop playsInline />
                 <span className="feed-tag source-tag">ORIGINAL VIDEO</span>
               </div>
             </div>
@@ -125,8 +126,8 @@ function App() {
       </section>
 
       <section className="analytics-section">
-        <div className="panel-heading"><div><span className="section-kicker">03 / PIPELINE OUTPUT</span><h3>Traffic intelligence</h3></div><span className="availability">{analytics ? "Real pipeline response" : "Waiting for analysis"}</span></div>
-        {!analytics ? <div className="empty-analytics">Tracking output is precomputed. Select a camera marker to compare the tracked and original videos.</div> : <div className="analytics-grid">
+        <div className="panel-heading"><div><span className="section-kicker">03 / PIPELINE OUTPUT</span><h3>Traffic intelligence</h3></div><span className="availability">{analytics ? "Precomputed pipeline response" : "Tracking not precomputed"}</span></div>
+        {!analytics ? <div className="empty-analytics">Run the precompute command once to generate the tracking video and analytics for this camera.</div> : <div className="analytics-grid">
           <Metric label="Unique vehicles" value={Object.values(analytics.vehicle_counts).reduce((sum, value) => sum + value, 0)} />
           <Metric label="Average occupancy" value={formatPercent(analytics.average_occupancy)} />
           <Metric label="Peak occupancy" value={formatPercent(analytics.peak_occupancy)} />
