@@ -1,0 +1,23 @@
+{
+  "camera_id": "CAM-BLR-01",
+  "source_video": "videos\\cam_blr_01.mp4",
+  "tracked_video": "tracked.mp4",
+  "confidence": 0.25,
+  "road_roi": [
+    0,
+    180,
+    1280,
+    720
+  ],
+  "generated_at": "2026-09-13T10:54:36.758252+00:00",
+  "analytics": {
+    "vehicle_counts": {
+      "car": 102,
+      "bus": 74,
+      "truck": 29,
+      "motorcycle": 5
+    },
+    "average_occupancy": 0.6353804469108582,
+    "peak_occupancy": 1.0
+  }
+}
