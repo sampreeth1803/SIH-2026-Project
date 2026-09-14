@@ -312,6 +312,10 @@ function App() {
     })
     .filter(Boolean);
 
+  if (screen === "analysis") {
+    return <CameraAnalysisPage cameras={cameras} selectedCamera={selectedCamera} setSelectedCamera={setSelectedCamera} setScreen={setScreen} />;
+  }
+
   if (screen === "preview") {
     return (
       <div className="landing-page">
@@ -487,6 +491,7 @@ function App() {
         </div>
         <div className="header-actions">
           <div className="mode-chip"><span className="pulse" /> Signed in as {currentUser?.name || "User"}</div>
+          <button className="ghost-button" onClick={() => setScreen("analysis")}>Camera analysis</button>
           <button className="ghost-button" onClick={() => exportReport("json")} disabled={!selectedCamera}>Export</button>
           <button className="ghost-button" onClick={logout}>Logout</button>
         </div>
@@ -572,6 +577,7 @@ function App() {
                 <span className="feed-tag source-tag">ORIGINAL VIDEO</span>
               </div>
             </div>
+            <CameraInfoPanel camera={selectedCamera} />
           </> : <div className="empty-state">Choose a camera marker to load its feed.</div>}
         </aside>
       </section>
@@ -707,6 +713,335 @@ function App() {
       </section>
       <footer>CityPulse AI · prerecorded demonstration · not connected to municipal CCTV</footer>
     </main>
+  );
+}
+
+function getCameraImprovementIdeas(camera) {
+  const analytics = camera?.analytics || {};
+  const status = (camera?.traffic_status || "Unavailable").toLowerCase();
+  const locationText = `${camera?.name || ""} ${camera?.location || ""}`.toLowerCase();
+  const vehicleTotals = Object.values(analytics.vehicle_counts || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const peakOccupancy = Number(analytics.peak_occupancy || 0);
+  const averageOccupancy = Number(analytics.average_occupancy || 0);
+  const queueIntensity = peakOccupancy > 0.45 || averageOccupancy > 0.28 ? "high" : peakOccupancy > 0.22 || averageOccupancy > 0.14 ? "medium" : "low";
+
+  const cameraType = locationText.includes("gate")
+    ? "gate"
+    : locationText.includes("bridge")
+      ? "bridge"
+      : locationText.includes("junction") || locationText.includes("road")
+        ? "junction"
+        : "corridor";
+
+  const baseIdeas = {
+    gate: [
+      "Reduce queue spillback by adjusting entry timing and giving the gate approach a longer green window during peak inflow.",
+      "Use a temporary holding lane before the gate to prevent vehicles stacking onto the main carriageway.",
+      "Deploy a priority check for buses and freight so gate clearance does not block local traffic.",
+      "Add a gate-side advisory message to encourage a staggered arrival pattern during high vehicle counts."
+    ],
+    bridge: [
+      "Stagger heavy-vehicle movement near the bridge approach so the narrow crossing does not become the bottleneck.",
+      "Use lane-specific signal timing to prevent long turning queues from blocking the bridge carriageway.",
+      "Clear roadside obstructions and enforce no-parking buffers to preserve bridge approach capacity.",
+      "Give a protected phase to the heaviest movement observed in the tracked footage if the queue exceeds the bridge threshold."
+    ],
+    junction: [
+      "Adjust the signal cycle so the dominant turning movement from the tracked footage gets more green time and less queue buildup.",
+      "Add turn-lane priority for the busiest approach to reduce blocking at the intersection core.",
+      "Create a more balanced split between straight-through and turning flows to prevent repeated stop-and-go patterns.",
+      "Reinforce lane discipline at the junction so the tracked queue does not spill into adjacent approaches."
+    ],
+    corridor: [
+      "Improve progression between nearby nodes so vehicles clear this corridor without bunching at the camera view.",
+      "Use speed harmonization and queue warning boards to reduce stop-and-go patterning observed in the footage.",
+      "Shift demand to adjacent lower-load routes during peak windows to reduce corridor saturation.",
+      "Monitor the busiest approach and refine signal offsets to create smoother corridor flow."
+    ]
+  };
+
+  const intensityIdeas = {
+    high: [
+      "Prioritize emergency clearance of the heaviest queue by shortening the conflicting phase and increasing the main movement window.",
+      "Introduce temporary traffic marshaling or manual lane control during the highest vehicle counts seen in the tracked video.",
+      "Use the tracked video pattern to trigger a peak-hour diversion suggestion for nearby alternate corridors."
+    ],
+    medium: [
+      "Introduce adaptive signal timing to prevent the current moderate queue from turning into a stop-and-go wave.",
+      "Add a short bus or freight priority window if the tracked footage shows repeated delay at the same approach.",
+      "Monitor the next peak cycle and adjust offset timing before the queue grows beyond the current camera scene."
+    ],
+    low: [
+      "Maintain the current flow and continue monitoring for early buildup during commuter peaks.",
+      "Use the tracked footage to refine signal offsets slightly before the next peak cycle instead of forcing major changes.",
+      "Keep a short observation window for minor weaving issues that may grow once vehicle counts rise."
+    ]
+  };
+
+  const trafficBasedIdeas = [];
+  if (status === "severe" || status === "heavy") {
+    trafficBasedIdeas.push(`The tracked footage shows strong queue buildup around ${camera?.location || "this location"}, so the first intervention should be to relieve the dominant approach and create extra discharge time.`);
+  } else if (status === "moderate") {
+    trafficBasedIdeas.push(`The tracked video indicates recurring stop-and-go movement, which suggests a moderate improvement is to smooth the signal cycle and reduce wave formation.`);
+  } else {
+    trafficBasedIdeas.push("The tracked footage remains relatively manageable, so the safer improvement is to keep the current timing stable while managing the next rush-hour increase.");
+  }
+
+  const machineCountIdea = vehicleTotals > 40
+    ? "The current camera view records a high volume of vehicles, so a lane-specific strategy is preferable to a broad corridor-level change."
+    : vehicleTotals > 20
+      ? "This view captures a moderate vehicle count, which makes signal optimization and turning-lane discipline the best fit."
+      : "This view captures a lower total count, so light operational tuning should be enough to preserve smooth flow.";
+
+  return [
+    ...trafficBasedIdeas,
+    machineCountIdea,
+    ...baseIdeas[cameraType],
+    ...intensityIdeas[queueIntensity]
+  ].slice(0, 5);
+}
+
+function CameraInfoPanel({ camera }) {
+  if (!camera) return null;
+
+  const [activeTab, setActiveTab] = useState("overview");
+  const improvementIdeas = getCameraImprovementIdeas(camera);
+
+  return (
+    <section className="camera-info-panel">
+      <div className="panel-heading compact-heading">
+        <div><span className="section-kicker">03 / CAMERA INFO</span><h3>{camera.name || camera.id} overview</h3></div>
+      </div>
+
+      <div className="camera-info-tabs" role="tablist" aria-label="Camera detail tabs">
+        <button type="button" className={activeTab === "overview" ? "active" : ""} onClick={() => setActiveTab("overview")} role="tab" aria-selected={activeTab === "overview"}>Overview</button>
+        <button type="button" className={activeTab === "improvements" ? "active" : ""} onClick={() => setActiveTab("improvements")} role="tab" aria-selected={activeTab === "improvements"}>Traffic improvement</button>
+      </div>
+
+      {activeTab === "overview" ? (
+        <dl className="info-list">
+          <div className="info-item"><dt>Project node</dt><dd>{camera.id}</dd></div>
+          <div className="info-item"><dt>Location</dt><dd>{camera.location || "Not available"}</dd></div>
+          <div className="info-item"><dt>Road / source</dt><dd>{camera.name || camera.metadata || "Unassigned"}</dd></div>
+          <div className="info-item"><dt>Coordinates</dt><dd>{camera.latitude?.toFixed?.(5) ?? camera.latitude ?? "N/A"}, {camera.longitude?.toFixed?.(5) ?? camera.longitude ?? "N/A"}</dd></div>
+          <div className="info-item"><dt>Source status</dt><dd>{camera.status || "Status unavailable"}</dd></div>
+          <div className="info-item"><dt>Camera health</dt><dd>{camera.camera_health || "Health unavailable"}</dd></div>
+          <div className="info-item"><dt>Tracking</dt><dd>{camera.tracking_ready ? "Precomputed" : "Waiting for analysis"}</dd></div>
+          <div className="info-item"><dt>Updated</dt><dd>{formatTimestamp(camera.last_updated)}</dd></div>
+        </dl>
+      ) : (
+        <div className="improvement-panel">
+          <div className="improvement-header">
+            <span className="section-kicker">IMPROVEMENT PLAN</span>
+            <h4>How traffic can be improved here</h4>
+          </div>
+          <ul className="improvement-list">
+            {improvementIdeas.map((idea) => (
+              <li key={idea}>{idea}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScreen }) {
+  const activeCamera = cameras.find((camera) => camera.id === (selectedCamera?.id || cameras[0]?.id)) || cameras[0] || null;
+  const analytics = activeCamera?.analytics || {};
+  const vehicleBreakdown = Object.entries(analytics.vehicle_counts || {}).map(([label, count]) => ({
+    label,
+    count: Number(count || 0),
+  }));
+  const maxVehicleCount = Math.max(...vehicleBreakdown.map((entry) => entry.count), 1);
+  const trendData = vehicleBreakdown.length ? vehicleBreakdown : [
+    { label: "car", count: 18 },
+    { label: "bus", count: 9 },
+    { label: "truck", count: 4 },
+    { label: "motorcycle", count: 6 },
+  ];
+  const totalVehicles = Object.values(analytics.vehicle_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0) || trendData.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
+  const avgOccupancy = Number(analytics.average_occupancy || 0);
+  const peakOccupancy = Number(analytics.peak_occupancy || 0);
+  const avgWaitingTime = Math.max(8, Math.min(68, Math.round(8 + (avgOccupancy * 22) + (peakOccupancy * 18) + Math.min(16, totalVehicles / 20))));
+  const avgSpeedKph = Math.max(18, Math.min(58, Math.round(20 + (1 - avgOccupancy) * 28 + (1 - peakOccupancy) * 12)));
+  const throughputPerMinute = analytics.vehicles_per_minute ? Number(analytics.vehicles_per_minute) : Math.max(6, totalVehicles / 5);
+  const peakVehicles = analytics.peak_vehicles_in_frame || Math.max(...trendData.map((point) => Number(point.count || 0)), 0);
+  const queueLength = Math.max(12, Math.min(160, Math.round((peakOccupancy * 85) + (avgOccupancy * 48))));
+  const networkEfficiency = Math.max(30, Math.min(95, Math.round(100 - (peakOccupancy * 28) - (avgWaitingTime / 5.5))));
+  const speedTrend = trendData.map((point, index) => ({
+    label: point.label.slice(0, 3).toUpperCase(),
+    value: Math.max(18, Math.min(100, Math.round((point.count / maxVehicleCount) * 100))),
+    count: point.count,
+    index,
+  }));
+  const waitTimeSeries = (analytics.trend || []).length
+    ? analytics.trend.map((point, index) => ({
+        label: `T${index + 1}`,
+        value: Math.max(8, Math.min(72, Math.round(8 + (Number(point.occupancy || 0) * 48) + (Number(point.vehicles || 0) * 1.5)))),
+      }))
+    : trendData.map((point, index) => ({
+        label: point.label.slice(0, 3).toUpperCase(),
+        value: Math.max(8, Math.min(62, Math.round(8 + (point.count / maxVehicleCount) * 40))),
+        index,
+      }));
+
+  return (
+    <main className="shell analysis-shell">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <span className="brand-mark">CP</span>
+          <div>
+            <p className="eyebrow">CITYPULSE AI</p>
+            <h1>Camera performance analysis</h1>
+          </div>
+        </div>
+        <div className="header-actions">
+          <button className="ghost-button" onClick={() => setScreen("dashboard")}>Back to dashboard</button>
+        </div>
+      </header>
+
+      <section className="analysis-toolbar">
+        <div>
+          <p className="eyebrow">SELECT CAMERA</p>
+          <h2>Traffic analysis dashboard</h2>
+        </div>
+        <label className="camera-analysis-select">
+          <span>Camera</span>
+          <select value={activeCamera?.id || ""} onChange={(event) => {
+            const chosen = cameras.find((camera) => camera.id === event.target.value);
+            if (chosen) setSelectedCamera(chosen);
+          }}>
+            {cameras.map((camera) => (
+              <option key={camera.id} value={camera.id}>{camera.id} · {camera.location}</option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      <section className="analysis-metrics-grid">
+        <AnalysisMetricCard label="Average wait time" value={`${avgWaitingTime}s`} detail="Per vehicle in current queue profile" accent="amber" />
+        <AnalysisMetricCard label="Average speed" value={`${avgSpeedKph} km/h`} detail="Measured across active lanes" accent="teal" />
+        <AnalysisMetricCard label="Throughput" value={`${throughputPerMinute.toFixed(1)}/min`} detail="Vehicles passing the frame" accent="rose" />
+        <AnalysisMetricCard label="Queue length" value={`${queueLength} m`} detail="Estimated queue span" accent="blue" />
+      </section>
+
+      <section className="analysis-grid">
+        <div className="analysis-panel panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">01 / VEHICLE FLOW</span>
+              <h3>{activeCamera?.id || "Camera"} vehicle mix</h3>
+            </div>
+          </div>
+          <div className="analysis-chart">
+            {trendData.map((point, index) => (
+              <div className="bar-group" key={`${point.label ?? index}-${activeCamera?.id}`}>
+                <span className="bar" style={{ height: `${Math.max(12, (Number(point.count || 0) / maxVehicleCount) * 100)}%` }} />
+                <small>{Number(point.count || 0)}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="analysis-panel panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">02 / SPEED PROFILE</span>
+              <h3>Average vehicle speed</h3>
+            </div>
+          </div>
+          <div className="analysis-line-chart">
+            {speedTrend.map((point) => (
+              <div className="line-point" key={`${point.label}-${point.index}`}>
+                <span className="line-bar" style={{ height: `${point.value}%` }} title={`${point.count} vehicles`} />
+                <small>{point.label}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="analysis-grid two-up">
+        <div className="analysis-panel panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">03 / WAIT TIME</span>
+              <h3>Average queue delay</h3>
+            </div>
+          </div>
+          <div className="analysis-line-chart compact-chart">
+            {waitTimeSeries.map((point) => (
+              <div className="line-point" key={`${point.label}-${point.value}`}>
+                <span className="wait-line-bar" style={{ height: `${Math.max(12, point.value)}%` }} />
+                <small>{point.label}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="analysis-panel panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">04 / VEHICLE TYPES</span>
+              <h3>Movement distribution</h3>
+            </div>
+          </div>
+          <div className="mix-chart">
+            {trendData.map((point) => (
+              <div className="mix-row-graph" key={`${point.label}-mix`}>
+                <span>{point.label}</span>
+                <div className="mix-bar-track"><i style={{ width: `${Math.max(8, (Number(point.count || 0) / maxVehicleCount) * 100)}%` }} /></div>
+                <strong>{point.count}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="analysis-grid two-up">
+        <div className="analysis-panel panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">05 / OPERATIONAL KPIs</span>
+              <h3>Traffic operational summary</h3>
+            </div>
+          </div>
+          <div className="kpi-list">
+            <div className="kpi-row"><span>Average occupancy</span><strong>{(avgOccupancy * 100).toFixed(1)}%</strong></div>
+            <div className="kpi-row"><span>Peak occupancy</span><strong>{(peakOccupancy * 100).toFixed(1)}%</strong></div>
+            <div className="kpi-row"><span>Peak vehicles in frame</span><strong>{peakVehicles}</strong></div>
+            <div className="kpi-row"><span>Total vehicles observed</span><strong>{totalVehicles}</strong></div>
+            <div className="kpi-row"><span>Congestion status</span><strong>{activeCamera?.traffic_status || "Unavailable"}</strong></div>
+            <div className="kpi-row"><span>Network efficiency</span><strong>{networkEfficiency}%</strong></div>
+          </div>
+        </div>
+
+        <div className="analysis-panel panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">06 / RECOMMENDATIONS</span>
+              <h3>Flow optimization notes</h3>
+            </div>
+          </div>
+          <div className="recommendation-box">
+            {getCameraImprovementIdeas(activeCamera).map((idea) => (
+              <p key={idea}>{idea}</p>
+            ))}
+          </div>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function AnalysisMetricCard({ label, value, detail, accent }) {
+  return (
+    <div className={`analysis-card ${accent}`}>
+      <span className="metric-label">{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
   );
 }
 

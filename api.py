@@ -313,8 +313,15 @@ def predict_route(from_camera_id: str, to_camera_id: str, time_value: str | None
         total_distance_km += _segment_distance_km(current, nxt)
 
     average_congestion = sum(congestion_scores) / len(congestion_scores) if congestion_scores else 0.0
-    travel_minutes = max(7.0, total_distance_km * (1.0 + average_congestion * 2.5) * 12.0)
-    travel_minutes = round(travel_minutes, 1)
+    # Convert the camera-to-camera distance into an urban driving estimate. The
+    # previous multiplier treated every kilometer as twelve minutes, which made
+    # short neighborhood routes look like cross-city journeys.
+    road_distance_km = total_distance_km * 1.25
+    free_flow_speed_kph = 32.0
+    congestion_speed_kph = max(12.0, free_flow_speed_kph * (1.0 - 0.55 * average_congestion))
+    drive_minutes = (road_distance_km / congestion_speed_kph) * 60.0
+    signal_delay_minutes = max(0, len(route) - 2) * (0.5 + average_congestion * 1.5)
+    travel_minutes = round(max(1.0, drive_minutes + signal_delay_minutes), 1)
 
     return {
         "from": start_camera["id"],
@@ -327,7 +334,10 @@ def predict_route(from_camera_id: str, to_camera_id: str, time_value: str | None
         "segment_congestion": segment_congestion,
         "best_route_reason": (
             "Lower traffic load and shorter distance path at this time window"
-            if average_congestion < 0.5 else "Route is under moderate congestion; consider off-peak alternatives"
+            if average_congestion < 0.45
+            else "Route is under peak congestion; consider off-peak alternatives"
+            if average_congestion >= 0.7
+            else "Route is under moderate congestion; consider off-peak alternatives"
         ),
     }
 

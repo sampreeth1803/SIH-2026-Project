@@ -21,6 +21,12 @@ class RoutePredictorTests(unittest.TestCase):
         self.assertGreaterEqual(len(route["route"]), 2)
         self.assertGreater(route["estimated_travel_minutes"], 0)
         self.assertGreaterEqual(route["average_congestion"], 0)
+        self.assertLess(route["estimated_travel_minutes"], 20)
+
+    def test_same_camera_route_has_no_artificial_minimum_delay(self):
+        route = predict_route("CAM-BLR-01", "CAM-BLR-01", "12:00")
+        self.assertEqual(route["route"], ["CAM-BLR-01"])
+        self.assertEqual(route["estimated_travel_minutes"], 1.0)
 
 
 if __name__ == "__main__":
