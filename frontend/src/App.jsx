@@ -1,20 +1,20 @@
 import { useEffect, useState } from "react";
 import { CircleMarker, MapContainer, Polyline, TileLayer, Tooltip } from "react-leaflet";
+import { Camera, ChartNoAxesCombined, ChevronDown, Route, Search } from "lucide-react";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
 const BENGALURU_CENTER = [12.9716, 77.5946];
 const ACCOUNTS_KEY = "citypulse-auth-accounts";
 const SESSION_KEY = "citypulse-auth-session";
 
-function buildRoadPath(start, end, steps = 18) {
-  const points = [];
-  for (let index = 0; index <= steps; index += 1) {
-    const ratio = index / steps;
-    const lat = start[0] + (end[0] - start[0]) * ratio;
-    const lng = start[1] + (end[1] - start[1]) * ratio;
-    points.push([lat, lng]);
-  }
-  return points;
+async function getRoadGeometry(start, end) {
+  const coordinates = `${start[1]},${start[0]};${end[1]},${end[0]}`;
+  const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${coordinates}?overview=full&geometries=geojson`);
+  if (!response.ok) throw new Error("Road routing service is unavailable.");
+  const data = await response.json();
+  const geometry = data.routes?.[0]?.geometry?.coordinates;
+  if (!geometry?.length) throw new Error("No drivable road route was found.");
+  return geometry.map(([longitude, latitude]) => [latitude, longitude]);
 }
 
 function loadAccounts() {
@@ -51,7 +51,7 @@ async function fetchJson(url, options) {
 }
 
 function formatPercent(value) {
-  return value == null ? "Unavailable" : `${(value * 100).toFixed(1)}%`;
+  return value == null ? "Unavailable" : `${Math.round(value * 100)}%`;
 }
 
 function statusFromAnalytics(analytics) {
@@ -130,6 +130,9 @@ function App() {
   const [routePrediction, setRoutePrediction] = useState(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState("");
+  const [roadSegments, setRoadSegments] = useState([]);
+  const [roadRouteError, setRoadRouteError] = useState("");
+  const [roadRouting, setRoadRouting] = useState(false);
   const [cameraSearch, setCameraSearch] = useState("");
   const [heatmapEnabled, setHeatmapEnabled] = useState(true);
   const [trafficPredictions, setTrafficPredictions] = useState(null);
@@ -181,6 +184,42 @@ function App() {
         setPredictionError(reason.message);
       });
   }, [screen, selectedCamera?.id, selectedCamera?.analytics]);
+
+  useEffect(() => {
+    const segments = routePrediction?.segment_congestion || [];
+    if (!segments.length || !cameras.length) {
+      setRoadSegments([]);
+      setRoadRouting(false);
+      return;
+    }
+
+    let cancelled = false;
+    setRoadRouteError("");
+    setRoadRouting(true);
+    Promise.all(segments.map(async (segment) => {
+      const from = cameras.find((camera) => camera.id === segment.from);
+      const to = cameras.find((camera) => camera.id === segment.to);
+      if (!from || !to) return null;
+      const start = [from.latitude, from.longitude];
+      const end = [to.latitude, to.longitude];
+      try {
+        return { ...segment, path: await getRoadGeometry(start, end) };
+      } catch {
+        // Retain a shaped fallback if the public routing service is offline.
+        const bend = [start[0], end[1]];
+        return { ...segment, path: [start, bend, end], fallback: true };
+      }
+    })).then((items) => {
+      if (!cancelled) {
+        const resolved = items.filter(Boolean);
+        setRoadSegments(resolved);
+        if (resolved.some((segment) => segment.fallback)) setRoadRouteError("Road routing is temporarily unavailable; showing an approximate route.");
+        setRoadRouting(false);
+      }
+    });
+
+    return () => { cancelled = true; };
+  }, [routePrediction, cameras]);
 
   const selectCamera = (camera) => {
     setSelectedCamera(camera);
@@ -299,19 +338,6 @@ function App() {
         .filter(Boolean)
     : [];
 
-  const routeMapSegments = routePrediction?.segment_congestion || [];
-  const roadSegments = routeMapSegments
-    .map((segment) => {
-      const from = cameras.find((camera) => camera.id === segment.from);
-      const to = cameras.find((camera) => camera.id === segment.to);
-      if (!from || !to) return null;
-      return {
-        ...segment,
-        path: buildRoadPath([from.latitude, from.longitude], [to.latitude, to.longitude], 20),
-      };
-    })
-    .filter(Boolean);
-
   if (screen === "analysis") {
     return <CameraAnalysisPage cameras={cameras} selectedCamera={selectedCamera} setSelectedCamera={setSelectedCamera} setScreen={setScreen} />;
   }
@@ -383,16 +409,19 @@ function App() {
           <section id="features" className="feature-grid">
             <FeatureCard
               color="teal"
+              icon={<Camera aria-hidden="true" />}
               title="Camera intelligence"
               text="Track vehicle movement across four simulated city points and visualize what the road looks like in real time."
             />
             <FeatureCard
               color="amber"
+              icon={<ChartNoAxesCombined aria-hidden="true" />}
               title="Forecasted congestion"
               text="Estimate traffic intensity by time of day and choose routes with less delay before you leave."
             />
             <FeatureCard
               color="rose"
+              icon={<Route aria-hidden="true" />}
               title="Smart route planning"
               text="Get a color-coded route prediction showing where roads are clear, moderate, or highly congested."
             />
@@ -512,18 +541,18 @@ function App() {
         <div className="map-panel panel">
           <div className="panel-heading">
             <div><span className="section-kicker">01 / NETWORK MAP</span><h3>Bengaluru camera grid</h3></div>
-            <div className="map-controls"><label><input type="checkbox" checked={heatmapEnabled} onChange={(event) => setHeatmapEnabled(event.target.checked)} /> Heatmap</label><span className="map-hint">Click a node to inspect</span></div>
+            <div className="map-controls">
+              <button type="button" className={`heatmap-toggle ${heatmapEnabled ? "is-active" : ""}`} aria-pressed={heatmapEnabled} onClick={() => setHeatmapEnabled((enabled) => !enabled)}>
+                <span className="switch-track" aria-hidden="true"><i /></span><span>Heatmap {heatmapEnabled ? "on" : "off"}</span>
+              </button>
+              <span className="map-hint">Click a node to inspect</span>
+            </div>
           </div>
           <div className="map-wrap">
             {loadingCameras ? <div className="map-state">Loading camera network...</div> : (
               <MapContainer center={BENGALURU_CENTER} zoom={11} scrollWheelZoom className="map">
                 <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                {routeCoordinates.length > 1 && (
-                  <Polyline
-                    positions={routeCoordinates}
-                    pathOptions={{ color: "#ffcc66", weight: 4, opacity: 0.9, dashArray: "10 12" }}
-                  />
-                )}
+                {roadSegments.map((segment) => <Polyline key={`network-${segment.from}-${segment.to}`} positions={segment.path} pathOptions={{ color: segment.color, weight: 5, opacity: 0.9 }} />)}
                 {heatmapEnabled && cameras.filter((camera) => camera.analytics).map((camera) => (
                   <CircleMarker
                     key={`heat-${camera.id}`}
@@ -566,7 +595,7 @@ function App() {
         <aside className="camera-panel panel">
           <div className="panel-heading"><div><span className="section-kicker">02 / SELECTED FEED</span><h3>{selectedCamera?.id || "No camera selected"}</h3></div><span className={`status-label ${trafficStatus.toLowerCase().replace(" ", "-")}`}>{trafficStatus}</span></div>
           {selectedCamera ? <>
-            <div className="camera-meta"><span>{selectedCamera.location}</span><span>{selectedCamera.metadata}</span><span>{selectedCamera.status || "Status unavailable"} · {selectedCamera.camera_health || "Health unavailable"}</span><span>Updated {formatTimestamp(selectedCamera.last_updated)}</span><span>{selectedCamera.fps ? `${selectedCamera.fps.toFixed(1)} FPS` : "FPS unavailable"}</span><span>{selectedCamera.detection_confidence ? `Confidence ${(selectedCamera.detection_confidence * 100).toFixed(0)}%` : "Confidence unavailable"}</span></div>
+            <div className="camera-meta"><span>{selectedCamera.location}</span><span>{selectedCamera.metadata}</span><span>{selectedCamera.status || "Status unavailable"} · {selectedCamera.camera_health || "Health unavailable"}</span><span>Updated {formatTimestamp(selectedCamera.last_updated)}</span><span>{selectedCamera.fps ? `${Math.round(selectedCamera.fps)} FPS` : "FPS unavailable"}</span><span>{selectedCamera.detection_confidence ? `Confidence ${Math.round(selectedCamera.detection_confidence * 100)}%` : "Confidence unavailable"}</span></div>
             <div className="video-stack">
               <div className="video-frame">
                 {trackingReady ? <video key={selectedCamera.tracked_video_url} src={`${API_URL}${selectedCamera.tracked_video_url}`} controls autoPlay muted loop playsInline /> : <div className="video-state">Tracking has not been precomputed for this camera.</div>}
@@ -588,7 +617,7 @@ function App() {
           <Metric label="Unique vehicles" value={Object.values(analytics.vehicle_counts).reduce((sum, value) => sum + value, 0)} />
           <Metric label="Vehicles in latest frame" value={latestTrendValue(analytics, "vehicles")} />
           <Metric label="Peak vehicles in frame" value={analytics.peak_vehicles_in_frame ?? "Unavailable"} />
-          <Metric label="Vehicles per minute" value={analytics.vehicles_per_minute ? analytics.vehicles_per_minute.toFixed(1) : "Unavailable"} />
+          <Metric label="Vehicles per minute" value={analytics.vehicles_per_minute ? Math.round(analytics.vehicles_per_minute) : "Unavailable"} />
           <Metric label="Average occupancy" value={formatPercent(analytics.average_occupancy)} />
           <Metric label="Peak occupancy" value={formatPercent(analytics.peak_occupancy)} />
           <Metric label="Congestion" value={trafficStatus} />
@@ -628,15 +657,11 @@ function App() {
         <div className="route-form">
           <label>
             <span>From</span>
-            <select value={fromCameraId} onChange={(event) => setFromCameraId(event.target.value)}>
-              {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
-            </select>
+            <SearchableSelect label="Choose origin" value={fromCameraId} onChange={setFromCameraId} items={cameras.map((camera) => ({ id: camera.id, label: camera.name, description: camera.location }))} />
           </label>
           <label>
             <span>To</span>
-            <select value={toCameraId} onChange={(event) => setToCameraId(event.target.value)}>
-              {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
-            </select>
+            <SearchableSelect label="Choose destination" value={toCameraId} onChange={setToCameraId} items={cameras.map((camera) => ({ id: camera.id, label: camera.name, description: camera.location }))} />
           </label>
           <label>
             <span>Time</span>
@@ -658,7 +683,7 @@ function App() {
               </div>
               <div className="result-metric">
                 <span className="metric-label">Estimated congestion</span>
-                <strong>{(routePrediction.average_congestion * 100).toFixed(1)}%</strong>
+                <strong>{Math.round(routePrediction.average_congestion * 100)}%</strong>
               </div>
               <div className="result-metric">
                 <span className="metric-label">Travel time</span>
@@ -707,6 +732,8 @@ function App() {
                   />
                 ))}
               </MapContainer>
+              {roadRouting && <div className="route-map-loader" role="status" aria-live="polite"><span className="ai-loader-orb"><i /><i /><i /></span><strong>Finding the best road route</strong><small>Matching camera nodes to drivable streets</small></div>}
+              {roadRouteError && <p className="road-route-note">{roadRouteError}</p>}
             </div>
           </>
         )}
@@ -865,7 +892,7 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
   const peakOccupancy = Number(analytics.peak_occupancy || 0);
   const avgWaitingTime = Math.max(8, Math.min(68, Math.round(8 + (avgOccupancy * 22) + (peakOccupancy * 18) + Math.min(16, totalVehicles / 20))));
   const avgSpeedKph = Math.max(18, Math.min(58, Math.round(20 + (1 - avgOccupancy) * 28 + (1 - peakOccupancy) * 12)));
-  const throughputPerMinute = analytics.vehicles_per_minute ? Number(analytics.vehicles_per_minute) : Math.max(6, totalVehicles / 5);
+  const throughputPerMinute = Math.round(analytics.vehicles_per_minute ? Number(analytics.vehicles_per_minute) : Math.max(6, totalVehicles / 5));
   const peakVehicles = analytics.peak_vehicles_in_frame || Math.max(...trendData.map((point) => Number(point.count || 0)), 0);
   const queueLength = Math.max(12, Math.min(160, Math.round((peakOccupancy * 85) + (avgOccupancy * 48))));
   const networkEfficiency = Math.max(30, Math.min(95, Math.round(100 - (peakOccupancy * 28) - (avgWaitingTime / 5.5))));
@@ -908,21 +935,17 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
         </div>
         <label className="camera-analysis-select">
           <span>Camera</span>
-          <select value={activeCamera?.id || ""} onChange={(event) => {
-            const chosen = cameras.find((camera) => camera.id === event.target.value);
+          <SearchableSelect label="Choose camera" value={activeCamera?.id || ""} onChange={(id) => {
+            const chosen = cameras.find((camera) => camera.id === id);
             if (chosen) setSelectedCamera(chosen);
-          }}>
-            {cameras.map((camera) => (
-              <option key={camera.id} value={camera.id}>{camera.id} · {camera.location}</option>
-            ))}
-          </select>
+          }} items={cameras.map((camera) => ({ id: camera.id, label: `${camera.id} · ${camera.location}`, description: camera.name }))} />
         </label>
       </section>
 
       <section className="analysis-metrics-grid">
         <AnalysisMetricCard label="Average wait time" value={`${avgWaitingTime}s`} detail="Per vehicle in current queue profile" accent="amber" />
         <AnalysisMetricCard label="Average speed" value={`${avgSpeedKph} km/h`} detail="Measured across active lanes" accent="teal" />
-        <AnalysisMetricCard label="Throughput" value={`${throughputPerMinute.toFixed(1)}/min`} detail="Vehicles passing the frame" accent="rose" />
+        <AnalysisMetricCard label="Throughput" value={`${throughputPerMinute}/min`} detail="Vehicles passing the frame" accent="rose" />
         <AnalysisMetricCard label="Queue length" value={`${queueLength} m`} detail="Estimated queue span" accent="blue" />
       </section>
 
@@ -935,12 +958,16 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
             </div>
           </div>
           <div className="analysis-chart">
-            {trendData.map((point, index) => (
-              <div className="bar-group" key={`${point.label ?? index}-${activeCamera?.id}`}>
-                <span className="bar" style={{ height: `${Math.max(12, (Number(point.count || 0) / maxVehicleCount) * 100)}%` }} />
-                <small>{Number(point.count || 0)}</small>
-              </div>
-            ))}
+            <ChartScale maximum={maxVehicleCount} />
+            <div className="chart-plot">
+              {trendData.map((point, index) => (
+                <div className="bar-group" key={`${point.label ?? index}-${activeCamera?.id}`}>
+                  <span className="bar-value">{Math.round(Number(point.count || 0))}</span>
+                  <span className="bar" style={{ height: `${Math.max(12, (Number(point.count || 0) / maxVehicleCount) * 100)}%` }} />
+                  <small>{point.label}</small>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -952,12 +979,16 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
             </div>
           </div>
           <div className="analysis-line-chart">
-            {speedTrend.map((point) => (
-              <div className="line-point" key={`${point.label}-${point.index}`}>
-                <span className="line-bar" style={{ height: `${point.value}%` }} title={`${point.count} vehicles`} />
-                <small>{point.label}</small>
-              </div>
-            ))}
+            <ChartScale maximum={100} suffix=" km/h" />
+            <div className="chart-plot">
+              {speedTrend.map((point) => (
+                <div className="line-point" key={`${point.label}-${point.index}`}>
+                  <span className="line-value">{Math.round(point.value)} km/h</span>
+                  <span className="line-bar" style={{ height: `${point.value}%` }} title={`${point.count} vehicles`} />
+                  <small>{point.label}</small>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </section>
@@ -971,12 +1002,16 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
             </div>
           </div>
           <div className="analysis-line-chart compact-chart">
-            {waitTimeSeries.map((point) => (
-              <div className="line-point" key={`${point.label}-${point.value}`}>
-                <span className="wait-line-bar" style={{ height: `${Math.max(12, point.value)}%` }} />
-                <small>{point.label}</small>
-              </div>
-            ))}
+            <ChartScale maximum={80} suffix="s" />
+            <div className="chart-plot">
+              {waitTimeSeries.map((point) => (
+                <div className="line-point" key={`${point.label}-${point.value}`}>
+                  <span className="line-value">{Math.round(point.value)}s</span>
+                  <span className="wait-line-bar" style={{ height: `${Math.max(12, point.value)}%` }} />
+                  <small>{point.label}</small>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -992,7 +1027,7 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
               <div className="mix-row-graph" key={`${point.label}-mix`}>
                 <span>{point.label}</span>
                 <div className="mix-bar-track"><i style={{ width: `${Math.max(8, (Number(point.count || 0) / maxVehicleCount) * 100)}%` }} /></div>
-                <strong>{point.count}</strong>
+                <strong>{Math.round(point.count)}</strong>
               </div>
             ))}
           </div>
@@ -1008,8 +1043,8 @@ function CameraAnalysisPage({ cameras, selectedCamera, setSelectedCamera, setScr
             </div>
           </div>
           <div className="kpi-list">
-            <div className="kpi-row"><span>Average occupancy</span><strong>{(avgOccupancy * 100).toFixed(1)}%</strong></div>
-            <div className="kpi-row"><span>Peak occupancy</span><strong>{(peakOccupancy * 100).toFixed(1)}%</strong></div>
+            <div className="kpi-row"><span>Average occupancy</span><strong>{Math.round(avgOccupancy * 100)}%</strong></div>
+            <div className="kpi-row"><span>Peak occupancy</span><strong>{Math.round(peakOccupancy * 100)}%</strong></div>
             <div className="kpi-row"><span>Peak vehicles in frame</span><strong>{peakVehicles}</strong></div>
             <div className="kpi-row"><span>Total vehicles observed</span><strong>{totalVehicles}</strong></div>
             <div className="kpi-row"><span>Congestion status</span><strong>{activeCamera?.traffic_status || "Unavailable"}</strong></div>
@@ -1045,6 +1080,32 @@ function AnalysisMetricCard({ label, value, detail, accent }) {
   );
 }
 
+function ChartScale({ maximum, suffix = "" }) {
+  const midpoint = Math.round(maximum / 2);
+  return <div className="chart-scale" aria-label={`Chart scale from 0 to ${maximum}${suffix}`}><span>{maximum}{suffix}</span><span>{midpoint}{suffix}</span><span>0{suffix}</span></div>;
+}
+
+function SearchableSelect({ label, value, items, onChange }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selected = items.find((item) => item.id === value);
+  const visibleItems = items.filter((item) => `${item.label} ${item.description || ""}`.toLowerCase().includes(query.toLowerCase()));
+
+  return (
+    <div className="smooth-select">
+      <button type="button" className="smooth-select-trigger" aria-haspopup="listbox" aria-expanded={isOpen} onClick={() => { setIsOpen((open) => !open); setQuery(""); }}>
+        <span>{selected?.label || label}</span><ChevronDown aria-hidden="true" size={16} />
+      </button>
+      {isOpen && <div className="smooth-select-menu" role="listbox" aria-label={label}>
+        <div className="smooth-select-search"><Search aria-hidden="true" size={15} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search cameras..." /></div>
+        <div className="smooth-select-options">
+          {visibleItems.length ? visibleItems.map((item) => <button type="button" role="option" aria-selected={item.id === value} className={item.id === value ? "selected" : ""} key={item.id} onClick={() => { onChange(item.id); setIsOpen(false); setQuery(""); }}><strong>{item.label}</strong>{item.description && <small>{item.description}</small>}</button>) : <span className="smooth-select-empty">No cameras found</span>}
+        </div>
+      </div>}
+    </div>
+  );
+}
+
 function Metric({ label, value }) {
   return <div className="metric"><span className="metric-label">{label}</span><strong>{value}</strong></div>;
 }
@@ -1074,10 +1135,10 @@ function AlertPanel({ alerts, selectedCamera }) {
   );
 }
 
-function FeatureCard({ color, title, text }) {
+function FeatureCard({ color, icon, title, text }) {
   return (
     <article className={`feature-card ${color}`}>
-      <div className="feature-icon" />
+      <div className="feature-icon">{icon}</div>
       <h3>{title}</h3>
       <p>{text}</p>
     </article>
