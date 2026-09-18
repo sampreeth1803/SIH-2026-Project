@@ -2,22 +2,30 @@ from __future__ import annotations
 
 import json
 import math
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
+from anpr import best_plate_candidate
+from camera_catalog import load_catalogue
 from detection import detect_vehicles
+from india_registration import infer_indian_registration
+from live_tracking import live_feed_manager
+from privacy import anonymize_plate, normalize_plate
 from tracking import track_vehicles
+from tomtom_traffic import tomtom_traffic
 from video_processing import convert_to_mp4, find_tracking_video
 
 BASE_DIR = Path(__file__).resolve().parent
 VIDEO_DIR = BASE_DIR / "videos"
 OUTPUT_DIR = BASE_DIR / "output"
+CATALOGUE_CAMERAS: list[dict] = []
 
 CAMERAS = [
     {
@@ -79,6 +87,12 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def refresh_bengaluru_catalogue() -> None:
+    global CATALOGUE_CAMERAS
+    CATALOGUE_CAMERAS = load_catalogue(refresh=True, count=100)
+
+
 def public_camera(camera: dict) -> dict:
     manifest = camera_manifest(camera["id"])
     analytics = manifest.get("analytics") if manifest else None
@@ -90,6 +104,10 @@ def public_camera(camera: dict) -> dict:
         for key, value in camera.items()
         if key != "video_path"
     } | {
+        "source_type": "demo_video",
+        "source_attribution": "CityPulse local demonstration footage",
+        "source_licence": "Local prototype asset",
+        "video_available": source_available,
         "video_url": f"/api/cameras/{camera['id']}/video",
         "tracked_video_url": f"/api/cameras/{camera['id']}/tracked-video",
         "tracking_ready": manifest is not None,
@@ -106,6 +124,17 @@ def public_camera(camera: dict) -> dict:
         "detection_confidence": manifest.get("confidence") if manifest else None,
         "vehicle_count": vehicle_count,
         "congestion_level": traffic_level(analytics),
+    }
+
+
+def catalogue_camera(camera: dict) -> dict:
+    return camera | {
+        "video_url": None, "tracked_video_url": None, "tracking_ready": False,
+        "analytics": None, "traffic_status": "Catalogue only", "alerts": [],
+        "status": "Location only", "processing_status": "No authorised video source",
+        "camera_health": "No video source assigned", "last_updated": None,
+        "fps": None, "video_quality": "Unavailable", "detection_confidence": None,
+        "vehicle_count": None, "congestion_level": "Unavailable",
     }
 
 
@@ -386,6 +415,7 @@ def health():
         "camera_sources": f"{available_cameras}/{len(CAMERAS)} available",
         "precomputed_cameras": f"{ready_cameras}/{len(CAMERAS)} ready",
         "active_jobs": sum(job.get("status") == "running" for job in jobs.values()),
+        "tomtom_traffic": "configured" if tomtom_traffic.configured else "not configured",
         "last_successful_processing": max(
             (camera_manifest(camera["id"]).get("generated_at", "") for camera in CAMERAS if camera_manifest(camera["id"])),
             default=None,
@@ -395,7 +425,34 @@ def health():
 
 @app.get("/api/cameras")
 def list_cameras():
-    return [public_camera(camera) for camera in CAMERAS]
+    return [public_camera(camera) for camera in CAMERAS] + [catalogue_camera(camera) for camera in CATALOGUE_CAMERAS]
+
+
+def traffic_camera_by_id(camera_id: str) -> dict | None:
+    return next((camera for camera in CAMERAS + CATALOGUE_CAMERAS if camera["id"] == camera_id), None)
+
+
+@app.get("/api/traffic/cameras")
+def list_camera_traffic():
+    cameras = CAMERAS + CATALOGUE_CAMERAS
+    tomtom_traffic.refresh_all_async(cameras)
+    traffic = [tomtom_traffic.cached_camera_traffic(camera) for camera in cameras]
+    return {
+        "provider": "TomTom Traffic Flow",
+        "refresh_seconds": tomtom_traffic.ttl_seconds,
+        "cameras": [
+            {"camera_id": camera["id"], "latitude": camera["latitude"], "longitude": camera["longitude"]} | item
+            for camera, item in zip(cameras, traffic)
+        ],
+    }
+
+
+@app.get("/api/traffic/cameras/{camera_id}")
+def camera_traffic(camera_id: str):
+    camera = traffic_camera_by_id(camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return {"camera_id": camera_id, "latitude": camera["latitude"], "longitude": camera["longitude"]} | tomtom_traffic.camera_traffic(camera)
 
 
 @app.get("/api/cameras/{camera_id}/video")
@@ -534,3 +591,77 @@ def job_video(job_id: str):
         raise HTTPException(status_code=404, detail="Processed video is unavailable")
     media_type = "video/mp4" if output_path.suffix.lower() == ".mp4" else "video/x-msvideo"
     return FileResponse(output_path, media_type=media_type)
+
+
+@app.get("/api/live-feeds")
+def list_live_feeds():
+    return [feed | {"traffic": tomtom_traffic.camera_traffic(feed)} for feed in live_feed_manager.feeds()]
+
+
+@app.post("/api/live-feeds/{feed_id}/start")
+def start_live_feed(feed_id: str):
+    try:
+        live_feed_manager.start(feed_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return next(feed for feed in live_feed_manager.feeds() if feed["id"] == feed_id)
+
+
+@app.post("/api/live-feeds/{feed_id}/stop")
+def stop_live_feed(feed_id: str):
+    if not any(feed["id"] == feed_id for feed in live_feed_manager.feeds()):
+        raise HTTPException(status_code=404, detail="Live feed not found")
+    live_feed_manager.stop(feed_id)
+    return {"id": feed_id, "status": "Stopping"}
+
+
+@app.get("/api/live-feeds/{feed_id}/{kind}.mjpeg")
+def live_feed_stream(feed_id: str, kind: str):
+    if kind not in {"original", "tracked"}:
+        raise HTTPException(status_code=404, detail="Unknown stream type")
+    return StreamingResponse(live_feed_manager.frame(feed_id, kind), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.post("/api/anpr/recognize")
+async def recognize_plate(request: Request):
+    try:
+        form = await request.form()
+    except AssertionError as exc:
+        raise HTTPException(status_code=503, detail="Install python-multipart to enable image uploads") from exc
+    image = form.get("image")
+    confirmed_plate = form.get("confirmed_plate")
+    if image is None or not hasattr(image, "read"):
+        raise HTTPException(status_code=400, detail="An image upload is required")
+    if image.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
+    contents = await image.read()
+    if not contents or len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be between 1 byte and 5 MB")
+    suffix = Path(image.filename or "plate.jpg").suffix or ".jpg"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+            temporary.write(contents)
+            temporary_path = Path(temporary.name)
+        candidate = best_plate_candidate(temporary_path)
+    finally:
+        if temporary_path:
+            temporary_path.unlink(missing_ok=True)
+    if not candidate:
+        return {"candidate": None, "requires_confirmation": True, "result": None,
+                "message": "No reliable plate text was found. Upload a sharper, front-facing image."}
+    if not confirmed_plate:
+        return {"candidate": candidate, "requires_confirmation": True, "result": None,
+                "message": "Review or correct the OCR result before registration-area lookup."}
+    confirmed = normalize_plate(confirmed_plate)
+    if len(confirmed) < 4 or len(confirmed) > 14:
+        raise HTTPException(status_code=400, detail="Confirmed plate text must contain 4 to 14 letters or digits")
+    masked = f"{confirmed[:2]}***{confirmed[-3:]}" if len(confirmed) > 5 else "***"
+    return {"candidate": candidate, "requires_confirmation": False,
+            "result": {"plate_masked": masked, "plate_id": anonymize_plate(confirmed),
+                       "registration": infer_indian_registration(confirmed), "sightings": []},
+            "message": "No verified camera sightings are stored in this upload-only release."}

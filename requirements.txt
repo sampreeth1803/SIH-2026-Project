@@ -4,3 +4,5 @@ opencv-python
 imageio-ffmpeg
 fastapi
 uvicorn[standard]
+python-multipart
+truststore

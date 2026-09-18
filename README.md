@@ -9,6 +9,8 @@ CityPulse AI is a local Smart India Hackathon prototype for city-wide traffic an
 - Traffic-intensity and route-congestion prediction.
 - Interactive Leaflet camera map with a heatmap toggle and road-following route geometry (using OSRM when available).
 - Searchable camera and route selectors, responsive analysis charts, and downloadable CSV/JSON reports.
+- OpenCity Bengaluru camera-location catalogue nodes (location metadata only; not municipal feed access).
+- Live Tracking slots for explicitly authorised external traffic feeds, plus an India-first number-plate image OCR page.
 
 ## Requirements
 
@@ -32,6 +34,12 @@ If PowerShell blocks activation, use the environment Python directly:
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+## TomTom production traffic
+
+Copy `.env.example` to `.env` and set `TOMTOM_API_KEY` on the backend host. The key is read only by FastAPI and must never be added as a `VITE_*` frontend variable. The dashboard requests TomTom Flow Segment data for each Bengaluru node every 60 seconds and shows current/free-flow speed, delay, confidence, and a red congestion heat halo.
+
+Live Tracking only starts when each `live_feeds.json` entry has an authorised direct `stream_url` plus valid Bengaluru coordinates. Public camera-directory pages are attribution links only; the application does not scrape or extract their protected media streams.
 
 ## Precompute camera analytics
 
@@ -93,3 +101,11 @@ output/cameras/        Generated camera manifests and tracked videos
 ## Privacy note
 
 This prototype works with local, pre-recorded demonstration footage. It does not claim to use live municipal CCTV feeds.
+
+## Camera catalogue and live feeds
+
+At startup the API refreshes a spatially balanced sample of 100 Bengaluru camera locations from OpenCity and caches the last valid result in `data/bengaluru_camera_catalogue.json`. The source is credited as OpenCity / Thejesh GN and OpenStreetMap under CC BY-NC-SA 4.0. Catalogue nodes never imply video access.
+
+`live_feeds.json` contains the three supplied OpenCCTV camera pages. The Live Tracking page embeds each source page beside a ByteTrack result panel. A camera page is not itself a machine-readable video stream, so server-side tracking remains on standby until an authorised direct `stream_url` (MJPEG, RTSP, or HLS) is configured for that feed. This preserves a clear distinction between viewing an external page and processing its video. Do not add direct stream URLs unless their terms permit display and automated analysis.
+
+The Number Plate Recognition page processes an uploaded JPEG, PNG, or WebP image transiently. It requires review before India registration-area lookup and returns a masked plate plus salted hash; it does not determine a vehicle's current location.

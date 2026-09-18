@@ -1,0 +1,5 @@
+[
+  {"id":"OPENCCTV-14534","name":"OpenCCTV camera 14534","provider":"OpenCCTV","country":"Public camera directory","location":"Source location shown by OpenCCTV","latitude":0,"longitude":0,"page_url":"https://opencctv.org/cam/14534","stream_url":"","enabled":true,"approval_reference":"User-provided OpenCCTV camera page"},
+  {"id":"OPENCCTV-2458","name":"OpenCCTV camera 2458","provider":"OpenCCTV","country":"Public camera directory","location":"Source location shown by OpenCCTV","latitude":0,"longitude":0,"page_url":"https://opencctv.org/cam/2458","stream_url":"","enabled":true,"approval_reference":"User-provided OpenCCTV camera page"},
+  {"id":"OPENCCTV-2323","name":"OpenCCTV camera 2323","provider":"OpenCCTV","country":"Public camera directory","location":"Source location shown by OpenCCTV","latitude":0,"longitude":0,"page_url":"https://opencctv.org/cam/2323","stream_url":"","enabled":true,"approval_reference":"User-provided OpenCCTV camera page"}
+]

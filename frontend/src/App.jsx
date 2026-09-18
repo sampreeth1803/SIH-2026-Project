@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleMarker, MapContainer, Polyline, TileLayer, Tooltip } from "react-leaflet";
+import { CircleMarker, MapContainer, Polyline, TileLayer, Tooltip, useMapEvents } from "react-leaflet";
 import { Camera, ChartNoAxesCombined, ChevronDown, Route, Search } from "lucide-react";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
@@ -76,10 +76,8 @@ function formatTimestamp(value) {
 }
 
 function markerColor(status) {
-  if (status === "Severe" || status === "Heavy") return "#ff525f";
-  if (status === "Moderate") return "#ffbf4d";
-  if (status === "Low") return "#35d399";
-  return "#789095";
+  // Node colour is intentionally consistent with prerecorded camera nodes.
+  return status ? "#ff525f" : "#789095";
 }
 
 function buildTrafficSummary(camera, analytics, status) {
@@ -112,6 +110,15 @@ function BangaloreTrafficMap() {
   );
 }
 
+function ClusteredCameraMarkers({ cameras, selectedCamera, onSelect }) {
+  const [zoom, setZoom] = useState(11);
+  useMapEvents({ zoomend: (event) => setZoom(event.target.getZoom()) });
+  if (zoom >= 13) return cameras.map((camera) => <CircleMarker key={camera.id} center={[camera.latitude, camera.longitude]} radius={selectedCamera?.id === camera.id ? 12 : 7} pathOptions={{ color: selectedCamera?.id === camera.id ? "#f8fafc" : markerColor(camera.traffic_status), fillColor: markerColor(camera.traffic_status), fillOpacity: .9, weight: 2 }} eventHandlers={{ click: () => onSelect(camera) }}><Tooltip>{camera.id} · {camera.location}</Tooltip></CircleMarker>);
+  const groups = new Map();
+  cameras.forEach((camera) => { const key = `${Math.round(camera.latitude * 45)}:${Math.round(camera.longitude * 45)}`; const group = groups.get(key) || []; group.push(camera); groups.set(key, group); });
+  return [...groups.values()].map((group) => { const latitude = group.reduce((sum, item) => sum + item.latitude, 0) / group.length; const longitude = group.reduce((sum, item) => sum + item.longitude, 0) / group.length; const first = group[0]; return <CircleMarker key={`cluster-${first.id}`} center={[latitude, longitude]} radius={Math.min(17, 7 + group.length / 3)} pathOptions={{ color: "#8ab6ff", fillColor: "#173b59", fillOpacity: .92, weight: 2 }} eventHandlers={{ click: () => onSelect(first) }}><Tooltip>{group.length} camera nodes — zoom in to expand</Tooltip></CircleMarker>; });
+}
+
 function App() {
   const [screen, setScreen] = useState("preview");
   const [authMode, setAuthMode] = useState("login");
@@ -138,6 +145,7 @@ function App() {
   const [trafficPredictions, setTrafficPredictions] = useState(null);
   const [predictionError, setPredictionError] = useState("");
   const [systemHealth, setSystemHealth] = useState(null);
+  const [tomtomTraffic, setTomtomTraffic] = useState({});
 
   useEffect(() => {
     window.localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts));
@@ -164,6 +172,17 @@ function App() {
       })
       .catch((reason) => setError(reason.message))
       .finally(() => setLoadingCameras(false));
+  }, [screen]);
+
+  useEffect(() => {
+    if (screen !== "dashboard") return;
+    let cancelled = false;
+    const loadTraffic = () => fetchJson(`${API_URL}/api/traffic/cameras`).then((payload) => {
+      if (!cancelled) setTomtomTraffic(Object.fromEntries((payload.cameras || []).map((item) => [item.camera_id, item])));
+    }).catch(() => { if (!cancelled) setTomtomTraffic({}); });
+    loadTraffic();
+    const timer = window.setInterval(loadTraffic, 60000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [screen]);
 
   useEffect(() => {
@@ -327,8 +346,10 @@ function App() {
   const analytics = selectedCamera?.analytics;
   const trackingReady = selectedCamera?.tracking_ready;
   const trafficStatus = selectedCamera?.traffic_status || statusFromAnalytics(analytics);
+  const selectedRoadTraffic = selectedCamera ? tomtomTraffic[selectedCamera.id] : null;
   const alerts = selectedCamera?.alerts || [];
   const filteredCameras = cameras.filter((camera) => `${camera.id} ${camera.name} ${camera.location}`.toLowerCase().includes(cameraSearch.toLowerCase()));
+  const routeCameras = cameras.filter((camera) => camera.video_available);
   const routeCoordinates = routePrediction
     ? routePrediction.route
         .map((cameraId) => {
@@ -341,6 +362,8 @@ function App() {
   if (screen === "analysis") {
     return <CameraAnalysisPage cameras={cameras} selectedCamera={selectedCamera} setSelectedCamera={setSelectedCamera} setScreen={setScreen} />;
   }
+  if (screen === "live") return <LiveTrackingPage setScreen={setScreen} />;
+  if (screen === "anpr") return <AnprPage setScreen={setScreen} />;
 
   if (screen === "preview") {
     return (
@@ -521,6 +544,8 @@ function App() {
         <div className="header-actions">
           <div className="mode-chip"><span className="pulse" /> Signed in as {currentUser?.name || "User"}</div>
           <button className="ghost-button" onClick={() => setScreen("analysis")}>Camera analysis</button>
+          <button className="ghost-button" onClick={() => setScreen("live")}>Live Tracking</button>
+          <button className="ghost-button" onClick={() => setScreen("anpr")}>Number Plate Recognition</button>
           <button className="ghost-button" onClick={() => exportReport("json")} disabled={!selectedCamera}>Export</button>
           <button className="ghost-button" onClick={logout}>Logout</button>
         </div>
@@ -553,43 +578,28 @@ function App() {
               <MapContainer center={BENGALURU_CENTER} zoom={11} scrollWheelZoom className="map">
                 <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                 {roadSegments.map((segment) => <Polyline key={`network-${segment.from}-${segment.to}`} positions={segment.path} pathOptions={{ color: segment.color, weight: 5, opacity: 0.9 }} />)}
-                {heatmapEnabled && cameras.filter((camera) => camera.analytics).map((camera) => (
+                {heatmapEnabled && cameras.filter((camera) => Number.isFinite(camera.latitude) && Number.isFinite(camera.longitude)).map((camera) => (
                   <CircleMarker
                     key={`heat-${camera.id}`}
                     center={[camera.latitude, camera.longitude]}
-                    radius={18 + Math.round((camera.analytics?.peak_occupancy || 0) * 34)}
-                    pathOptions={{ color: markerColor(camera.traffic_status), fillColor: markerColor(camera.traffic_status), fillOpacity: 0.14, weight: 1, opacity: 0.35 }}
+                    radius={18 + Math.round(((tomtomTraffic[camera.id]?.heat_intensity ?? camera.analytics?.peak_occupancy ?? 0.12)) * 34)}
+                    pathOptions={{ color: "#ff525f", fillColor: "#ff525f", fillOpacity: tomtomTraffic[camera.id]?.available ? 0.24 : camera.analytics ? 0.17 : 0.08, weight: 1, opacity: 0.38 }}
                   />
                 ))}
-                {cameras.map((camera) => (
-                  <CircleMarker
-                    key={camera.id}
-                    center={[camera.latitude, camera.longitude]}
-                    radius={selectedCamera?.id === camera.id ? 12 : 8}
-                    pathOptions={{ color: selectedCamera?.id === camera.id ? "#f8fafc" : markerColor(camera.traffic_status), fillColor: markerColor(camera.traffic_status), fillOpacity: 0.95, weight: selectedCamera?.id === camera.id ? 4 : 3 }}
-                    eventHandlers={{ click: () => selectCamera(camera) }}
-                  >
-                    <Tooltip>{camera.id} · {camera.location}</Tooltip>
-                  </CircleMarker>
-                ))}
+                <ClusteredCameraMarkers cameras={cameras} selectedCamera={selectedCamera} onSelect={selectCamera} />
               </MapContainer>
             )}
           </div>
-          <div className="camera-list-tools"><input type="search" value={cameraSearch} onChange={(event) => setCameraSearch(event.target.value)} placeholder="Search cameras or locations" /><span>{filteredCameras.length} of {cameras.length}</span></div>
-          <div className="camera-list" aria-label="Camera list">
-            {filteredCameras.map((camera) => (
-              <button
-                key={camera.id}
-                className={`camera-list-item ${selectedCamera?.id === camera.id ? "selected" : ""}`}
-                onClick={() => selectCamera(camera)}
-              >
-                <span className={`camera-status-dot ${String(camera.traffic_status || "unavailable").toLowerCase()}`} />
-                <span><strong>{camera.id}</strong><small>{camera.location}</small></span>
-                <em>{camera.traffic_status || "Unavailable"}</em>
-              </button>
-            ))}
+          <div className="camera-dropdown" aria-label="Camera selector">
+            <SearchableSelect
+              label="Choose a camera node"
+              value={selectedCamera?.id || ""}
+              onChange={(cameraId) => selectCamera(cameras.find((camera) => camera.id === cameraId))}
+              items={cameras.map((camera) => ({ id: camera.id, label: camera.id, description: `${camera.location} · ${camera.source_type === "catalogue" ? "Catalogue node" : "Demo video"}` }))}
+            />
+            <span>{cameras.length} camera nodes</span>
           </div>
-          <div className="map-footer"><span><i className="legend-dot" /> Prerecorded simulation</span><span>OpenStreetMap base layer</span></div>
+          <div className="map-footer"><span><i className="legend-dot" /> Demo video / location catalogue</span><span>OpenCity locations: CC BY-NC-SA 4.0</span></div>
         </div>
 
         <aside className="camera-panel panel">
@@ -602,11 +612,12 @@ function App() {
                 <span className="feed-tag">TRACKED VIDEO</span>
               </div>
               <div className="video-frame source-video">
-                <video key={selectedCamera.video_url} src={`${API_URL}${selectedCamera.video_url}`} controls autoPlay muted loop playsInline />
+                {selectedCamera.video_available ? <video key={selectedCamera.video_url} src={`${API_URL}${selectedCamera.video_url}`} controls autoPlay muted loop playsInline /> : <div className="video-state">This is a location catalogue node. No authorised video source is assigned.</div>}
                 <span className="feed-tag source-tag">ORIGINAL VIDEO</span>
               </div>
             </div>
             <CameraInfoPanel camera={selectedCamera} />
+            <RoadTrafficPanel traffic={selectedRoadTraffic} />
           </> : <div className="empty-state">Choose a camera marker to load its feed.</div>}
         </aside>
       </section>
@@ -657,11 +668,11 @@ function App() {
         <div className="route-form">
           <label>
             <span>From</span>
-            <SearchableSelect label="Choose origin" value={fromCameraId} onChange={setFromCameraId} items={cameras.map((camera) => ({ id: camera.id, label: camera.name, description: camera.location }))} />
+            <SearchableSelect label="Choose origin" value={fromCameraId} onChange={setFromCameraId} items={routeCameras.map((camera) => ({ id: camera.id, label: camera.name, description: camera.location }))} />
           </label>
           <label>
             <span>To</span>
-            <SearchableSelect label="Choose destination" value={toCameraId} onChange={setToCameraId} items={cameras.map((camera) => ({ id: camera.id, label: camera.name, description: camera.location }))} />
+            <SearchableSelect label="Choose destination" value={toCameraId} onChange={setToCameraId} items={routeCameras.map((camera) => ({ id: camera.id, label: camera.name, description: camera.location }))} />
           </label>
           <label>
             <span>Time</span>
@@ -1108,6 +1119,26 @@ function SearchableSelect({ label, value, items, onChange }) {
 
 function Metric({ label, value }) {
   return <div className="metric"><span className="metric-label">{label}</span><strong>{value}</strong></div>;
+}
+
+function RoadTrafficPanel({ traffic }) {
+  if (!traffic?.available) return <section className="road-traffic-panel"><span className="section-kicker">TOMTOM ROAD TRAFFIC</span><p>{traffic?.error || "Live road traffic is loading or unavailable."}</p></section>;
+  return <section className="road-traffic-panel"><div><span className="section-kicker">TOMTOM ROAD TRAFFIC</span><strong>{traffic.congestion_level}</strong></div><div className="road-traffic-metrics"><span><small>Current</small>{Math.round(traffic.current_speed_kph)} km/h</span><span><small>Free flow</small>{Math.round(traffic.free_flow_speed_kph)} km/h</span><span><small>Delay</small>{Math.round(traffic.delay_seconds)} sec</span><span><small>Confidence</small>{Math.round(Number(traffic.confidence || 0) * 100)}%</span></div><p>Updated {formatTimestamp(traffic.updated_at)} · TomTom Traffic Flow</p></section>;
+}
+
+function LiveTrackingPage({ setScreen }) {
+  const [feeds, setFeeds] = useState([]), [error, setError] = useState("");
+  const load = () => fetchJson(`${API_URL}/api/live-feeds`).then(setFeeds).catch((reason) => setError(reason.message));
+  useEffect(() => { load(); const timer = window.setInterval(load, 3000); return () => window.clearInterval(timer); }, []);
+  const control = (feed, action) => fetchJson(`${API_URL}/api/live-feeds/${feed.id}/${action}`, { method: "POST" }).then(load).catch((reason) => setError(reason.message));
+  return <main className="shell feature-page"><header className="topbar"><div className="brand-lockup"><span className="brand-mark">CP</span><div><p className="eyebrow">CITYPULSE AI</p><h1>Live Tracking</h1></div></div><button className="ghost-button" onClick={() => setScreen("dashboard")}>Back to dashboard</button></header><section className="intro-row"><div><p className="eyebrow">AUTHORISED STREAMS / BYTE TRACK</p><h2>Source and tracked video, side by side.</h2><p className="lede">Only configured direct streams are processed. Public camera pages remain attribution links and are never scraped or embedded.</p></div></section>{error && <div className="error-banner">{error}</div>}<section className="live-grid">{feeds.map((feed) => <article className="panel live-card" key={feed.id}><div className="panel-heading"><div><span className="section-kicker">{feed.country}</span><h3>{feed.name}</h3></div><span className="status-label">{feed.status}</span></div><p className="live-meta">{feed.provider} · {feed.location}</p><div className="live-videos"><div><span>LIVE SOURCE</span>{feed.status === "Running" ? <img src={`${API_URL}${feed.original_stream_url}`} alt={`Original ${feed.name} feed`} /> : <div className="tracking-wait"><strong>Stream unavailable</strong><small>Configure an authorised direct HLS, MJPEG, or RTSP source for this Bengaluru camera.</small>{feed.page_url && <a href={feed.page_url} target="_blank" rel="noreferrer">Open source attribution</a>}</div>}</div><div><span>YOLO + BYTETRACK</span>{feed.status === "Running" ? <img src={`${API_URL}${feed.tracked_stream_url}`} alt={`ByteTrack result for ${feed.name}`} /> : <div className="tracking-wait"><strong>Tracking standby</strong><small>{feed.processing_ready ? "Start analysis to generate the tracked video." : "Tracking starts automatically once a healthy authorised stream is configured."}</small></div>}</div></div><div className="live-footer"><small>{feed.analytics ? `${feed.analytics.vehicles_in_latest_frame} vehicles · ${feed.analytics.processing_fps} FPS · ByteTrack` : feed.traffic?.available ? `${Math.round(feed.traffic.current_speed_kph)} km/h · ${feed.traffic.congestion_level} road traffic` : "Awaiting authorised stream and coordinates"}</small>{feed.status === "Running" ? <button className="ghost-button compact" onClick={() => control(feed, "stop")}>Stop</button> : <button className="ghost-button compact" disabled={!feed.processing_ready} onClick={() => control(feed, "start")}>Start tracking</button>}</div></article>)}</section></main>;
+}
+
+function AnprPage({ setScreen }) {
+  const [file, setFile] = useState(null), [candidate, setCandidate] = useState(null), [confirmed, setConfirmed] = useState(""), [result, setResult] = useState(null), [message, setMessage] = useState(""), [busy, setBusy] = useState(false), [dragging, setDragging] = useState(false);
+  const submit = async (confirm = false) => { if (!file) return setMessage("Choose a JPEG, PNG, or WebP plate image first."); setBusy(true); setMessage(""); const data = new FormData(); data.append("image", file); if (confirm) data.append("confirmed_plate", confirmed); try { const response = await fetchJson(`${API_URL}/api/anpr/recognize`, { method: "POST", body: data }); setCandidate(response.candidate); setResult(response.result); setConfirmed(response.candidate?.text || confirmed); setMessage(response.message); } catch (reason) { setMessage(reason.message); } finally { setBusy(false); } };
+  const chooseFile = (nextFile) => { setFile(nextFile || null); setCandidate(null); setResult(null); setMessage(""); };
+  return <main className="shell feature-page"><header className="topbar"><div className="brand-lockup"><span className="brand-mark">CP</span><div><p className="eyebrow">CITYPULSE AI</p><h1>Number Plate Recognition</h1></div></div><button className="ghost-button" onClick={() => setScreen("dashboard")}>Back to dashboard</button></header><section className="anpr-layout"><section className="panel anpr-form"><span className="section-kicker">INDIA-FIRST / UPLOAD REVIEW</span><h2>Read a plate image safely.</h2><p>Drop a close, well-lit plate photo or browse for one. Images are processed transiently and deleted after review.</p><label className={`plate-dropzone ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); chooseFile(event.dataTransfer.files?.[0]); }}><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => chooseFile(event.target.files?.[0])} /><strong>{file ? file.name : "Drop plate image here"}</strong><small>{file ? `${Math.round(file.size / 1024)} KB selected — ready to scan` : "JPEG, PNG, or WebP · up to 5 MB · click to browse"}</small></label><button className="primary-button" disabled={busy || !file} onClick={() => submit(false)}>{busy ? "Reading…" : "Scan number plate"}</button>{candidate && !result && <><label>Confirm or correct OCR<input value={confirmed} onChange={(event) => setConfirmed(event.target.value.toUpperCase())} /></label><button className="primary-button" disabled={busy} onClick={() => submit(true)}>Confirm and identify registration area</button></>} {message && <p className="anpr-message">{message}</p>}</section><section className="panel anpr-result"><span className="section-kicker">RESULT</span>{result ? <><h2>{result.plate_masked}</h2><p>Anonymous ID: {result.plate_id}</p><div className="info-list"><div className="info-item"><dt>Country</dt><dd>{result.registration.country || "Not reliably determined"}</dd></div><div className="info-item"><dt>State</dt><dd>{result.registration.state || "Not available"}</dd></div><div className="info-item"><dt>Registration area</dt><dd>{result.registration.registration_area || "Not available"}</dd></div><div className="info-item"><dt>Verified sightings</dt><dd>{result.sightings.length}</dd></div></div><p className="anpr-message">{result.registration.reason}</p></> : <div className="live-empty">Choose a clear plate image to begin. You will review OCR before any registration-area lookup.</div>}</section></section></main>;
 }
 
 function TrendPanel({ analytics }) {
