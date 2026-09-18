@@ -6,6 +6,7 @@ from typing import Optional
 import cv2
 
 from detection import VEHICLE_CLASSES
+from vehicle_classes import model_class_name, model_vehicle_class_ids
 
 MODEL_PATH = Path(__file__).resolve().parent / "yolo11n.pt"
 
@@ -15,6 +16,27 @@ CLASS_NAMES = {
     5: "bus",
     7: "truck",
 }
+
+
+def tracking_class_ids(model) -> list[int]:
+    """Use taxonomy-trained weights when present, otherwise COCO vehicle IDs."""
+    return model_vehicle_class_ids(model.names)
+
+
+def frame_vehicle_metadata(result) -> list[dict]:
+    """Return browser-safe per-frame detections from an Ultralytics result."""
+    if result.boxes is None:
+        return []
+    classes = result.boxes.cls.cpu().numpy().astype(int)
+    boxes = result.boxes.xyxy.cpu().numpy()
+    confidences = result.boxes.conf.cpu().numpy()
+    track_ids = result.boxes.id.cpu().numpy().astype(int) if result.boxes.id is not None else [None] * len(classes)
+    vehicles = []
+    for track_id, class_id, confidence, box in zip(track_ids, classes, confidences, boxes):
+        name = model_class_name(result.names, int(class_id)) or CLASS_NAMES.get(int(class_id))
+        if name:
+            vehicles.append({"track_id": int(track_id) if track_id is not None else None, "class": name, "confidence": round(float(confidence), 3), "bbox": [round(float(value), 1) for value in box]})
+    return vehicles
 
 
 def track_vehicles(

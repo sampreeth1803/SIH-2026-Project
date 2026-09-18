@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from anpr import best_plate_candidate
 from camera_catalog import load_catalogue
+from camera_registry import CameraRegistry
 from detection import detect_vehicles
 from india_registration import infer_indian_registration
 from live_tracking import live_feed_manager
@@ -69,6 +70,7 @@ CAMERAS = [
         "road_roi": [0, 180, 1280, 720],
     },
 ]
+camera_registry = CameraRegistry(BASE_DIR, CAMERAS)
 
 jobs: dict[str, dict] = {}
 jobs_lock = Lock()
@@ -97,14 +99,19 @@ def public_camera(camera: dict) -> dict:
     manifest = camera_manifest(camera["id"])
     analytics = manifest.get("analytics") if manifest else None
     vehicle_count = sum((analytics or {}).get("vehicle_counts", {}).values()) if analytics else None
-    source_available = camera["video_path"].is_file()
+    source_available = bool(camera.get("source_available", camera.get("video_path", Path()).is_file()))
     processing_status = "Ready" if manifest else "Not precomputed"
     return {
         key: value
         for key, value in camera.items()
-        if key != "video_path"
+        if key not in {"video_path", "stream_source", "source_url", "stream_url", "source_env"}
     } | {
-        "source_type": "demo_video",
+        "source_type": camera.get("source_type", "demo_video"),
+        "stream_type": camera.get("stream_type", "mp4"),
+        "enabled": camera.get("enabled", True),
+        "source_available": source_available,
+        "tracking_available": bool(camera.get("tracking_available", source_available)),
+        "source_error": camera.get("source_error"),
         "source_attribution": "CityPulse local demonstration footage",
         "source_licence": "Local prototype asset",
         "video_available": source_available,
@@ -129,7 +136,7 @@ def public_camera(camera: dict) -> dict:
 
 def catalogue_camera(camera: dict) -> dict:
     return camera | {
-        "video_url": None, "tracked_video_url": None, "tracking_ready": False,
+        "video_url": None, "tracked_video_url": None, "tracking_ready": False, "source_available": False, "tracking_available": False, "stream_type": "none",
         "analytics": None, "traffic_status": "Catalogue only", "alerts": [],
         "status": "Location only", "processing_status": "No authorised video source",
         "camera_health": "No video source assigned", "last_updated": None,
@@ -425,16 +432,31 @@ def health():
 
 @app.get("/api/cameras")
 def list_cameras():
-    return [public_camera(camera) for camera in CAMERAS] + [catalogue_camera(camera) for camera in CATALOGUE_CAMERAS]
+    result = []
+    for camera in registry_cameras():
+        result.append(catalogue_camera(camera) if camera.get("source_type") == "catalogue" else public_camera(camera))
+    return result
+
+
+@app.get("/api/cameras/{camera_id}")
+def get_camera(camera_id: str):
+    camera = traffic_camera_by_id(camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return catalogue_camera(camera) if camera.get("source_type") == "catalogue" else public_camera(camera)
 
 
 def traffic_camera_by_id(camera_id: str) -> dict | None:
-    return next((camera for camera in CAMERAS + CATALOGUE_CAMERAS if camera["id"] == camera_id), None)
+    return camera_registry.get_camera(camera_id, CATALOGUE_CAMERAS)
+
+
+def registry_cameras() -> list[dict]:
+    return camera_registry.all_cameras(CATALOGUE_CAMERAS)
 
 
 @app.get("/api/traffic/cameras")
 def list_camera_traffic():
-    cameras = CAMERAS + CATALOGUE_CAMERAS
+    cameras = registry_cameras()
     tomtom_traffic.refresh_all_async(cameras)
     traffic = [tomtom_traffic.cached_camera_traffic(camera) for camera in cameras]
     return {
@@ -593,37 +615,65 @@ def job_video(job_id: str):
     return FileResponse(output_path, media_type=media_type)
 
 
-@app.get("/api/live-feeds")
-def list_live_feeds():
-    return [feed | {"traffic": tomtom_traffic.camera_traffic(feed)} for feed in live_feed_manager.feeds()]
+def _tracking_camera(camera_id: str) -> dict:
+    camera = traffic_camera_by_id(camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return camera
 
 
-@app.post("/api/live-feeds/{feed_id}/start")
-def start_live_feed(feed_id: str):
+@app.get("/api/cameras/{camera_id}/status")
+@app.get("/api/cameras/{camera_id}/tracking")
+def tracking_status(camera_id: str):
+    _tracking_camera(camera_id)
+    return live_feed_manager.status(camera_id)
+
+
+@app.post("/api/cameras/{camera_id}/tracking/start")
+def start_camera_tracking(camera_id: str):
+    camera = _tracking_camera(camera_id)
     try:
-        live_feed_manager.start(feed_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return live_feed_manager.start(camera)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return next(feed for feed in live_feed_manager.feeds() if feed["id"] == feed_id)
+
+
+@app.post("/api/cameras/{camera_id}/tracking/stop")
+def stop_camera_tracking(camera_id: str):
+    _tracking_camera(camera_id)
+    live_feed_manager.stop(camera_id)
+    return {"camera_id": camera_id, "status": "Stopping"}
+
+
+@app.get("/api/cameras/{camera_id}/stream")
+def camera_stream(camera_id: str, view: str = "tracked"):
+    _tracking_camera(camera_id)
+    if view not in {"original", "tracked"}:
+        raise HTTPException(status_code=400, detail="view must be original or tracked")
+    return StreamingResponse(live_feed_manager.frame(camera_id, view), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+# Compatibility routes for the existing Live Tracking page and bookmarked demos.
+@app.get("/api/live-feeds")
+def list_live_feeds():
+    return [public_camera(camera) | {"traffic": tomtom_traffic.camera_traffic(camera), **live_feed_manager.status(camera["id"])} for camera in registry_cameras() if camera.get("source_type") in {"demo", "configured"}]
+
+
+@app.post("/api/live-feeds/{feed_id}/start")
+def start_live_feed(feed_id: str):
+    return start_camera_tracking(feed_id)
 
 
 @app.post("/api/live-feeds/{feed_id}/stop")
 def stop_live_feed(feed_id: str):
-    if not any(feed["id"] == feed_id for feed in live_feed_manager.feeds()):
-        raise HTTPException(status_code=404, detail="Live feed not found")
-    live_feed_manager.stop(feed_id)
-    return {"id": feed_id, "status": "Stopping"}
+    return stop_camera_tracking(feed_id)
 
 
 @app.get("/api/live-feeds/{feed_id}/{kind}.mjpeg")
 def live_feed_stream(feed_id: str, kind: str):
-    if kind not in {"original", "tracked"}:
-        raise HTTPException(status_code=404, detail="Unknown stream type")
-    return StreamingResponse(live_feed_manager.frame(feed_id, kind), media_type="multipart/x-mixed-replace; boundary=frame")
+    return camera_stream(feed_id, "tracked" if kind == "tracked" else "original")
 
 
 @app.post("/api/anpr/recognize")

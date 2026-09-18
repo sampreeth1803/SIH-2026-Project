@@ -1,106 +1,111 @@
-"""Opt-in, in-memory live traffic processing for configured camera sources."""
+"""On-demand camera tracking sessions and MJPEG frame delivery."""
 from __future__ import annotations
 
-import json
+import logging
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from threading import Event, Lock, Thread
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "live_feeds.json"
+LOGGER = logging.getLogger("citypulse.tracking")
 
 
-class LiveFeedManager:
-    def __init__(self):
-        self._workers: dict[str, dict] = {}
-        self._lock = Lock()
+class TrackingSessionManager:
+    def __init__(self, max_sessions: int = 3):
+        self.max_sessions, self._sessions, self._lock = max_sessions, {}, Lock()
+        self._model, self._model_lock = None, Lock()
 
-    def _configured_feeds(self) -> list[dict]:
-        try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
+    def _load_model(self):
+        from tracking import MODEL_PATH
+        from ultralytics import YOLO
+        with self._model_lock:
+            if self._model is None:
+                if not MODEL_PATH.is_file():
+                    raise RuntimeError("YOLO model file is unavailable")
+                LOGGER.info("[YOLO] Loading shared model")
+                self._model = YOLO(str(MODEL_PATH))
+            return self._model
 
-    def feeds(self) -> list[dict]:
-        result = []
-        for feed in self._configured_feeds()[:3]:
-            worker = self._workers.get(feed.get("id", ""), {})
-            has_page, has_stream = bool(feed.get("page_url")), bool(feed.get("stream_url"))
-            enabled = bool(feed.get("enabled"))
-            processing_ready = enabled and has_stream
-            status = worker.get("status", "Ready" if processing_ready else "Viewing only")
-            result.append({key: value for key, value in feed.items() if key != "stream_url"} | {
-                "authorised": enabled and (has_page or has_stream), "processing_ready": processing_ready,
-                "status": status, "error": worker.get("error"), "analytics": worker.get("analytics"), "last_frame_at": worker.get("last_frame_at"),
-                "original_stream_url": f"/api/live-feeds/{feed.get('id')}/original.mjpeg" if status == "Running" else None,
-                "tracked_stream_url": f"/api/live-feeds/{feed.get('id')}/tracked.mjpeg" if status == "Running" else None,
-            })
-        return result
-
-    def start(self, feed_id: str) -> dict:
-        raw = next((item for item in self._configured_feeds() if item.get("id") == feed_id), None)
-        if not raw:
-            raise ValueError("Live feed not found")
-        if not raw.get("enabled"):
-            raise PermissionError("This feed has been disabled in live_feeds.json")
-        if not raw.get("stream_url"):
-            raise PermissionError("This camera page is embedded for viewing. Add its authorised direct MJPEG, RTSP, or HLS stream URL to stream_url before enabling server-side tracking.")
-        latitude, longitude = raw.get("latitude"), raw.get("longitude")
-        if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)) or (latitude == 0 and longitude == 0):
-            raise PermissionError("Add valid Bengaluru latitude and longitude before enabling this production feed.")
+    def start(self, camera: dict) -> dict:
+        camera_id = camera["id"]
+        if not camera.get("tracking_available"):
+            raise PermissionError(camera.get("source_error") or "No authorised live source is configured")
         with self._lock:
-            if self._workers.get(feed_id, {}).get("status") == "Running":
-                return self._workers[feed_id]
-            if sum(item.get("status") == "Running" for item in self._workers.values()) >= 3:
-                raise RuntimeError("The prototype supports at most three simultaneous feeds")
-            worker = {"status": "Starting", "error": None, "stop": Event(), "original": None, "tracked": None, "analytics": None, "last_frame_at": None, "source_url": raw["stream_url"]}
-            self._workers[feed_id] = worker
-            Thread(target=self._run, args=(worker,), daemon=True).start()
-            return worker
+            current = self._sessions.get(camera_id)
+            if current and current["status"] in {"Starting", "Running"}:
+                return self._public(current)
+            if sum(item["status"] in {"Starting", "Running"} for item in self._sessions.values()) >= self.max_sessions:
+                raise RuntimeError(f"The prototype supports at most {self.max_sessions} active tracking sessions")
+            session = {"camera_id": camera_id, "status": "Starting", "error": None, "stop": Event(), "original": None, "tracked": None, "started_at": datetime.now(timezone.utc).isoformat(), "last_frame_at": None, "frames_processed": 0, "vehicle_count": 0, "vehicles": [], "processing_fps": 0.0, "processing_latency_ms": None, "stream_type": camera["stream_type"], "source": camera["stream_source"]}
+            self._sessions[camera_id] = session
+        LOGGER.info("[CAMERA] Starting camera %s", camera_id)
+        Thread(target=self._run, args=(session,), daemon=True, name=f"tracking-{camera_id}").start()
+        return self._public(session)
 
-    def stop(self, feed_id: str) -> None:
-        if worker := self._workers.get(feed_id):
-            worker["stop"].set()
+    def stop(self, camera_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(camera_id)
+            if not session:
+                return False
+            if session["status"] in {"Starting", "Running"}:
+                session["status"] = "Stopping"
+                session["stop"].set()
+        return True
 
-    def frame(self, feed_id: str, kind: str):
+    def status(self, camera_id: str) -> dict:
+        with self._lock:
+            session = self._sessions.get(camera_id)
+            return self._public(session) if session else {"camera_id": camera_id, "status": "standby", "vehicle_count": 0, "vehicles": [], "processing_fps": 0.0, "processing_latency_ms": None, "error": None}
+
+    def frame(self, camera_id: str, view: str):
+        key = "tracked" if view == "tracked" else "original"
         while True:
-            worker = self._workers.get(feed_id)
-            if not worker or worker.get("status") not in {"Starting", "Running"}:
+            with self._lock:
+                session = self._sessions.get(camera_id)
+                status, image = (session.get("status"), session.get(key)) if session else (None, None)
+            if status not in {"Starting", "Running", "Stopping"}:
                 return
-            if image := worker.get(kind):
+            if image:
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + image + b"\r\n"
             time.sleep(0.08)
 
-    def _run(self, worker: dict) -> None:
+    @staticmethod
+    def _public(session: dict | None) -> dict:
+        if not session:
+            return {}
+        keys = {"camera_id", "status", "error", "started_at", "last_frame_at", "frames_processed", "vehicle_count", "vehicles", "processing_fps", "processing_latency_ms", "stream_type"}
+        return {key: session.get(key) for key in keys}
+
+    def _run(self, session: dict) -> None:
         capture = None
         try:
             import cv2
-            from ultralytics import YOLO
-            capture = cv2.VideoCapture(worker["source_url"])
+            from tracking import frame_vehicle_metadata, tracking_class_ids
+            LOGGER.info("[STREAM] Connecting to configured %s source", session["stream_type"])
+            capture = cv2.VideoCapture(session["source"])
             if not capture.isOpened():
                 raise RuntimeError("Could not open the configured media stream")
-            model = YOLO(str(BASE_DIR / "yolo11n.pt"))
-            worker["status"] = "Running"
-            frames, started = 0, time.monotonic()
-            while not worker["stop"].is_set():
+            model, started = self._load_model(), time.monotonic()
+            session["status"] = "Running"
+            while not session["stop"].is_set():
                 ok, frame = capture.read()
+                if not ok and session["stream_type"] == "mp4":
+                    capture.set(cv2.CAP_PROP_POS_FRAMES, 0); ok, frame = capture.read()
                 if not ok:
                     raise RuntimeError("Camera stream ended or became unavailable")
-                ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                worker["original"] = encoded.tobytes() if ok else None
-                result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7], conf=0.25, verbose=False)[0]
-                ok, encoded = cv2.imencode(".jpg", result.plot(), [cv2.IMWRITE_JPEG_QUALITY, 80])
-                worker["tracked"] = encoded.tobytes() if ok else None
-                frames += 1
-                worker["last_frame_at"] = datetime.now(timezone.utc).isoformat()
-                worker["analytics"] = {"tracker": "ByteTrack", "frames_processed": frames, "vehicles_in_latest_frame": len(result.boxes) if result.boxes is not None else 0, "processing_fps": round(frames / max(time.monotonic() - started, 0.001), 1)}
-            worker["status"] = "Stopped"
+                ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80]); session["original"] = encoded.tobytes() if ok else None
+                began = time.monotonic()
+                with self._model_lock:
+                    result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=tracking_class_ids(model), conf=0.25, verbose=False)[0]
+                session["processing_latency_ms"] = round((time.monotonic() - began) * 1000, 1)
+                session["vehicles"] = frame_vehicle_metadata(result); session["vehicle_count"] = len(session["vehicles"])
+                ok, encoded = cv2.imencode(".jpg", result.plot(), [cv2.IMWRITE_JPEG_QUALITY, 80]); session["tracked"] = encoded.tobytes() if ok else None
+                session["frames_processed"] += 1; session["last_frame_at"] = datetime.now(timezone.utc).isoformat(); session["processing_fps"] = round(session["frames_processed"] / max(time.monotonic() - started, 0.001), 1)
+            session["status"] = "Stopped"; LOGGER.info("[TRACKING] Camera %s stopped", session["camera_id"])
         except Exception as exc:
-            worker["status"], worker["error"] = "Failed", str(exc)
+            session["status"], session["error"] = "Error", str(exc); LOGGER.warning("[TRACKING] Camera %s failed: %s", session["camera_id"], exc)
         finally:
             if capture is not None:
                 capture.release()
 
 
-live_feed_manager = LiveFeedManager()
+live_feed_manager = TrackingSessionManager()

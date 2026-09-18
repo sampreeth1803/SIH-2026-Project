@@ -109,3 +109,18 @@ At startup the API refreshes a spatially balanced sample of 100 Bengaluru camera
 `live_feeds.json` contains the three supplied OpenCCTV camera pages. The Live Tracking page embeds each source page beside a ByteTrack result panel. A camera page is not itself a machine-readable video stream, so server-side tracking remains on standby until an authorised direct `stream_url` (MJPEG, RTSP, or HLS) is configured for that feed. This preserves a clear distinction between viewing an external page and processing its video. Do not add direct stream URLs unless their terms permit display and automated analysis.
 
 The Number Plate Recognition page processes an uploaded JPEG, PNG, or WebP image transiently. It requires review before India registration-area lookup and returns a masked plate plus salted hash; it does not determine a vehicle's current location.
+
+## On-demand live tracking
+
+The Live Tracking page uses one camera registry for the local MP4 demos, authorised configured streams, and location-only catalogue nodes. `DEMO-BLR-LOCAL` is enabled by default and loops `videos/cam_blr_01.mp4` so it is the guaranteed SIH demonstration path. Choose **Start tracking** to begin YOLO + ByteTrack; choose **Stop tracking** to release it.
+
+Configured entries in `live_feeds.json` support `mp4`, `mjpeg`, `hls`, and `rtsp`. Set `stream_type` to `none` whenever there is no authorised machine-readable source. For private URLs, set `source_env` to a `CAMERA_*` environment variable defined only on the backend host. RTSP is processed server-side and displayed to the browser as MJPEG; its credentials are never returned by the API.
+
+Canonical tracking endpoints are:
+
+- `GET /api/cameras/{camera_id}` and `GET /api/cameras/{camera_id}/status`
+- `POST /api/cameras/{camera_id}/tracking/start` and `POST /api/cameras/{camera_id}/tracking/stop`
+- `GET /api/cameras/{camera_id}/tracking`
+- `GET /api/cameras/{camera_id}/stream?view=tracked` (or `original`)
+
+At most three sessions run at once. A failed source changes only that camera to an error state; it does not stop the API. Run `python -m unittest discover -s tests -v` and `npm.cmd run build` from `frontend` to verify the implementation.
